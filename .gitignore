@@ -1,0 +1,54 @@
+# ============================
+# Python build and cache files
+# ============================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ============================
+# Virtual environments
+# ============================
+.venv/
+venv/
+env/
+ENV/
+
+# ============================
+# PyInstaller build files
+# ============================
+build/
+dist/
+*.spec
+
+# ============================
+# Logs and temporary files
+# ============================
+*.log
+*.tmp
+*.bak
+*.swp
+*.DS_Store
+Thumbs.db
+
+# ============================
+# IDE / Editor configs
+# ============================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ============================
+# OS-specific files
+# ============================
+.DS_Store
+desktop.ini
+
+# ============================
+# Application specific
+# ============================
+images/__pycache__/
+test/
+output/
+*.png
+*.json
