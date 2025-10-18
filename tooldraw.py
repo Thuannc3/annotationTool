@@ -217,11 +217,13 @@ class ContourEditor(QMainWindow):
         self.last_mouse_pos = event.pos()
         x, y = int(event.pos().x() / self.zoom_factor), int(event.pos().y() / self.zoom_factor)
         if event.button() == Qt.RightButton:
-            self.current_contour["points"].append((x, y))
+            mode = self.mode_selector.currentText()
+            self.current_contour["points"].append({"x": x, "y": y, "mode": mode})
             self.update_table()
             self.update_display()
         elif event.button() == Qt.LeftButton:
-            for i, (px, py) in enumerate(self.current_contour["points"]):
+            for i, p in enumerate(self.current_contour["points"]):
+                px, py = p["x"], p["y"]
                 if abs(x - px) < self.radius and abs(y - py) < self.radius:
                     self.selected_point = i
                     return
@@ -242,7 +244,8 @@ class ContourEditor(QMainWindow):
 
         if self.current_contour and self.selected_point != -1:
             x, y = int(event.pos().x() / self.zoom_factor), int(event.pos().y() / self.zoom_factor)
-            self.current_contour["points"][self.selected_point] = (x, y)
+            self.current_contour["points"][self.selected_point]["x"] = x
+            self.current_contour["points"][self.selected_point]["y"] = y
             self.update_table()
             self.update_display()
 
@@ -257,9 +260,9 @@ class ContourEditor(QMainWindow):
             return
         points = self.current_contour["points"]
         self.table.setRowCount(len(points))
-        for i, (x, y) in enumerate(points):
-            self.table.setItem(i, 0, QTableWidgetItem(str(x)))
-            self.table.setItem(i, 1, QTableWidgetItem(str(y)))
+        for i, p in enumerate(points):
+            self.table.setItem(i, 0, QTableWidgetItem(str(p["x"])))
+            self.table.setItem(i, 1, QTableWidgetItem(str(p["y"])))
         self.table.blockSignals(False)
 
     def table_item_changed(self, item):
@@ -269,7 +272,8 @@ class ContourEditor(QMainWindow):
         try:
             x = int(self.table.item(row, 0).text())
             y = int(self.table.item(row, 1).text())
-            self.current_contour["points"][row] = (x, y)
+            self.current_contour["points"][row]["x"] = x
+            self.current_contour["points"][row]["y"] = y
             self.update_display()
         except ValueError:
             pass
@@ -288,36 +292,16 @@ class ContourEditor(QMainWindow):
             return
         img = cv2.cvtColor(self.image.copy(), cv2.COLOR_GRAY2RGB)
         for contour in self.contours:
-            pts = contour["points"]
-            for i, (x, y) in enumerate(pts):
-                cv2.circle(img, (x, y), self.radius, (0, 0, 255), -1)
-                cv2.putText(img, f"P{i+1}", (x+5, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
-            if len(pts) > 1:
-                mode = contour.get("mode", "line")
-                if len(pts) > 1:
-                    if mode == 'line':
-                        cv2.polylines(img, [np.array(pts)], isClosed=True, color=(0, 255, 0), thickness=2)
-                    elif mode == 'curve':
-                        pts_array = np.array(pts)
-                        if len(pts_array) >= 4:  # đủ điểm để spline
-                            x = pts_array[:,0]
-                            y = pts_array[:,1]
-                            try:
-                                tck, u = splprep([x, y], s=0, per=True)
-                                unew = np.linspace(0, 1.0, 100)
-                                out = splev(unew, tck)
-                                curve_pts = np.vstack(out).T.astype(np.int32)
-                                cv2.polylines(img, [curve_pts], isClosed=True, color=(0, 255, 0), thickness=2)
-                            except Exception as e:
-                                # fallback sang polyline nếu lỗi
-                                cv2.polylines(img, [pts_array], isClosed=True, color=(0, 255, 0), thickness=2)
-                        else:
-                            # chưa đủ điểm, fallback polyline
-                            cv2.polylines(img, [pts_array], isClosed=True, color=(0, 255, 0), thickness=2)
-            if pts:
-                cx, cy = pts[0]
-                cv2.putText(img, contour["name"], (cx+10, cy+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+            # Vẽ điểm và nhãn
+            for i, p in enumerate(contour["points"]):
+                cv2.circle(img, (p["x"], p["y"]), self.radius, (0, 0, 255), -1)
+                cv2.putText(img, f"P{i+1}", (p["x"]+5, p["y"]-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
 
+            self.draw_contour_with_mixed_modes(contour, img)
+            # Ghi tên contour
+            if contour["points"]:
+                cx, cy = contour["points"][0]["x"], contour["points"][0]["y"]
+                cv2.putText(img, contour["name"], (cx+10, cy+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
         h, w, ch = img.shape
         bytes_per_line = ch * w
         qt_img = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888)
@@ -327,7 +311,7 @@ class ContourEditor(QMainWindow):
     def save_output(self):
         if self.image is None:
             return
-        file_name, _ = QFileDialog.getSaveFileName(self, "Save Image", "contour_output.png", "PNG Files (*.png)")
+        file_name, _ = QFileDialog.getSaveFileName(self, "Save Image", "mask.png", "PNG Files (*.png)")
         if file_name:
             cv2.imwrite(file_name, self.image)
 
@@ -342,10 +326,10 @@ class ContourEditor(QMainWindow):
             self.original_image = self.image.copy()
             annotated = np.full_like(self.image, self.base_value_box.value(), dtype=np.uint8)
             for contour in self.contours:
-                pts = np.array(contour["points"], dtype=np.int32)
-                if len(pts) >= 3:
+                poly = self.get_contour_polygon(contour)
+                if len(poly) >= 3:
                     mask = np.zeros_like(self.image, dtype=np.uint8)
-                    cv2.fillPoly(mask, [pts], 1)
+                    cv2.fillPoly(mask, [poly], 1)
                     annotated = np.where(mask == 1, contour["layer_value"], annotated)
             self.image = annotated
             self.is_annotated = True
@@ -375,6 +359,95 @@ class ContourEditor(QMainWindow):
                 self.contour_selector.addItem(c["name"])
             self.update_table()
             self.update_display()
+
+    def draw_quadratic_bezier(self, img, p0, p1, p2, color=(0,255,0), thickness=2):
+        curve_pts = []
+        for t in np.linspace(0, 1, 50):
+            x = int((1-t)**2 * p0[0] + 2*(1-t)*t*p1[0] + t**2*p2[0])
+            y = int((1-t)**2 * p0[1] + 2*(1-t)*t*p1[1] + t**2*p2[1])
+            curve_pts.append((x, y))
+        cv2.polylines(img, [np.array(curve_pts)], False, color, thickness)
+
+    def draw_contour_with_mixed_modes(self, contour, img):
+        pts = contour["points"]
+        if len(pts) < 2:
+            return
+
+        i = 0
+        while i < len(pts) - 1:
+            p0 = (pts[i]["x"], pts[i]["y"])
+            mode = pts[i+1]["mode"]
+
+            if mode == "line":
+                p1 = (pts[i+1]["x"], pts[i+1]["y"])
+                cv2.line(img, p0, p1, (0,255,0), 2)
+                i += 1
+
+            elif mode == "curve":
+                if i+2 < len(pts):
+                    p1 = (pts[i+1]["x"], pts[i+1]["y"])
+                    p2 = (pts[i+2]["x"], pts[i+2]["y"])
+                    self.draw_quadratic_bezier(img, p0, p1, p2, (0,255,0), 2)
+                    i += 2
+                else:
+                    # Không đủ điểm để vẽ cong → fallback line
+                    p1 = (pts[i+1]["x"], pts[i+1]["y"])
+                    cv2.line(img, p0, p1, (0,255,0), 2)
+                    i += 1
+        if len(pts) > 2:
+            p_last = (pts[-1]["x"], pts[-1]["y"])
+            p_first = (pts[0]["x"], pts[0]["y"])
+            cv2.line(img, p_last, p_first, (0,255,0), 1)
+    def get_contour_polygon(self, contour):
+        pts = contour["points"]
+        poly = []
+        if len(pts) < 2:
+            return np.array(poly, dtype=np.int32)
+
+        i = 0
+        while i < len(pts)-1:
+            p0 = (pts[i]["x"], pts[i]["y"])
+            mode = pts[i+1]["mode"]
+
+            if mode == "line":
+                p1 = (pts[i+1]["x"], pts[i+1]["y"])
+                poly.append(p0)
+                poly.append(p1)
+                i += 1
+
+            elif mode == "curve":
+                if i+2 < len(pts):
+                    p1 = (pts[i+1]["x"], pts[i+1]["y"])
+                    p2 = (pts[i+2]["x"], pts[i+2]["y"])
+                    for t in np.linspace(0,1,30):
+                        x = int((1-t)**2*p0[0] + 2*(1-t)*t*p1[0] + t**2*p2[0])
+                        y = int((1-t)**2*p0[1] + 2*(1-t)*t*p1[1] + t**2*p2[1])
+                        poly.append((x,y))
+                    i += 2
+                else:
+                    poly.append(p0)
+                    i += 1
+
+        # --- Đóng kín từ điểm cuối về điểm đầu ---
+        if len(pts) > 2:
+            p_last = (pts[-1]["x"], pts[-1]["y"])
+            p_first = (pts[0]["x"], pts[0]["y"])
+            mode = pts[0]["mode"]   # xét mode của điểm đầu
+
+            if mode == "line":
+                poly.append(p_last)
+                poly.append(p_first)
+
+            elif mode == "curve" and len(pts) >= 3:
+                # lấy thêm điểm thứ 2 làm control
+                p_ctrl = (pts[1]["x"], pts[1]["y"])
+                for t in np.linspace(0,1,30):
+                    x = int((1-t)**2*p_last[0] + 2*(1-t)*t*p_ctrl[0] + t**2*p_first[0])
+                    y = int((1-t)**2*p_last[1] + 2*(1-t)*t*p_ctrl[1] + t**2*p_first[1])
+                    poly.append((x,y))
+
+        return np.array(poly, dtype=np.int32)
+
 
     def show_help(self):
         msg = QMessageBox(self)
