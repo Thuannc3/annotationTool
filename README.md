@@ -10,7 +10,7 @@ Users can:
 
 ---
 
-## ⚙️ Environment Setup
+## ⚙️ Environment Setup (If you want to run by python)
 
 ### 1️⃣ Create Virtual Environment
 ```bash
