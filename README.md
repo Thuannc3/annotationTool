@@ -36,6 +36,12 @@ pip install -r requirement.txt
 
 ## ▶️ Run the Application
 
+Double click to
+
+```bash
+tooldraw.exe
+```
+or run
 ```bash
 python tooldraw.py
 ```
