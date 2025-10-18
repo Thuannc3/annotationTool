@@ -5,18 +5,22 @@ from qtpy.QtWidgets import (
     QApplication, QMainWindow, QLabel, QPushButton, QFileDialog,
     QVBoxLayout, QWidget, QTableWidget, QTableWidgetItem, QComboBox,
     QHeaderView, QHBoxLayout, QMenuBar, QMenu, QAction, QSplitter, QScrollArea,
-    QSpinBox
+    QSpinBox, QSpacerItem, QSizePolicy
 )
-from qtpy.QtGui import QPixmap, QImage
+from qtpy.QtGui import QPixmap, QImage, QIcon
 from qtpy.QtCore import Qt
 import cv2
 import numpy as np
+from scipy.interpolate import splprep, splev
+import json
+from PyQt5.QtWidgets import QMessageBox
 
 class ContourEditor(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Contour Editor with QtPy")
-        self.points = []
+        self.setWindowTitle("Contour Editor with QtPy - Multi Contours")
+        self.contours = []  # list of dicts {name, points, layer_value}
+        self.current_contour = None
         self.selected_point = -1
         self.radius = 5
         self.mode = 'line'
@@ -34,9 +38,24 @@ class ContourEditor(QMainWindow):
         load_action.triggered.connect(self.load_image)
         file_menu.addAction(load_action)
 
-        save_action = QAction("Save Output", self)
+        save_action = QAction("Save Image", self)
         save_action.triggered.connect(self.save_output)
         file_menu.addAction(save_action)
+
+        # Save contours (to JSON)
+        save_contours_action = QAction("Save Contours", self)
+        save_contours_action.triggered.connect(self.save_contours)
+        file_menu.addAction(save_contours_action)
+
+        # Load contours (from JSON)
+        load_contours_action = QAction("Load Contours", self)
+        load_contours_action.triggered.connect(self.load_contours)
+        file_menu.addAction(load_contours_action)
+
+        help_menu = menu_bar.addMenu("Help")
+        help_action = QAction("User Guide", self)
+        help_action.triggered.connect(self.show_help)
+        help_menu.addAction(help_action)
 
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
@@ -46,54 +65,57 @@ class ContourEditor(QMainWindow):
         main_layout = QVBoxLayout()
 
         control_layout = QHBoxLayout()
-        self.hand_mode = QCheckBox("Hand Mode")
-        self.hand_mode.setToolTip("Di chuyển ảnh bằng chuột trái khi bật chế độ này")
-        control_layout.addWidget(self.hand_mode)
-        btn_delete = QPushButton("Delete Selected Point")
-        btn_delete.setToolTip("Xóa điểm đang chọn khỏi danh sách")
-        btn_delete.setFixedWidth(150)
-        btn_delete.clicked.connect(self.delete_selected_point)
-        control_layout.addWidget(btn_delete)
 
-        btn_zoom_in = QPushButton("Zoom In")
-        btn_zoom_in.setToolTip("Phóng to ảnh")
-        btn_zoom_in.setFixedWidth(100)
+        self.last_mouse_pos = None
+
+        # Hand mode checkbox replaced by button with icon
+        self.hand_mode = QCheckBox()
+        self.hand_mode.setIcon(QIcon("images/hand.svg"))
+        self.hand_mode.setToolTip("Hand Mode")
+        self.hand_mode.stateChanged.connect(self.reset_pan_anchor)
+        control_layout.addWidget(self.hand_mode)
+
+        btn_zoom_in = QPushButton()
+        btn_zoom_in.setIcon(QIcon("images/zoom-in.svg"))
+        btn_zoom_in.setToolTip("Zoom In")
         btn_zoom_in.clicked.connect(self.zoom_in)
         control_layout.addWidget(btn_zoom_in)
 
-        btn_zoom_out = QPushButton("Zoom Out")
-        btn_zoom_out.setToolTip("Thu nhỏ ảnh")
-        btn_zoom_out.setFixedWidth(100)
+        btn_zoom_out = QPushButton()
+        btn_zoom_out.setIcon(QIcon("images/zoom-out.svg"))
+        btn_zoom_out.setToolTip("Zoom Out")
         btn_zoom_out.clicked.connect(self.zoom_out)
         control_layout.addWidget(btn_zoom_out)
 
-        
-        base_label = QLabel("Base Value:")
-        control_layout.addWidget(base_label)
+        control_layout.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
 
+        # Add contour button (green)
+        btn_add_contour = QPushButton("Add Contour")
+        btn_add_contour.setStyleSheet("background-color: lightgreen;")
+        btn_add_contour.clicked.connect(self.add_contour)
+        control_layout.addWidget(btn_add_contour)
 
+        self.contour_selector = QComboBox()
+        self.contour_selector.setMinimumWidth(200)
+        self.contour_selector.currentIndexChanged.connect(self.change_contour)
+        control_layout.addWidget(self.contour_selector)
+
+        btn_annotate = QPushButton("Annotate")
+        btn_annotate.clicked.connect(self.annotate_image)
+        control_layout.addWidget(btn_annotate)
+
+        control_layout.addWidget(QLabel("Base Value:"))
         self.base_value_box = QSpinBox()
         self.base_value_box.setRange(0, 255)
         self.base_value_box.setValue(0)
-        self.base_value_box.setToolTip("Giá trị nền")
         control_layout.addWidget(self.base_value_box)
 
-        
-        layer_label = QLabel("Layer Value:")
-        control_layout.addWidget(layer_label)
-
-
+        # Layer value moved up here
+        control_layout.addWidget(QLabel("Layer Value:"))
         self.layer_value_box = QSpinBox()
         self.layer_value_box.setRange(0, 255)
-        self.layer_value_box.setValue(255)
-        self.layer_value_box.setToolTip("Giá trị lớp")
+        self.layer_value_box.valueChanged.connect(self.update_contour_values)
         control_layout.addWidget(self.layer_value_box)
-
-        btn_annotate = QPushButton("Annotate")
-        btn_annotate.setToolTip("Gán giá trị lớp và nền theo contour")
-        btn_annotate.setFixedWidth(100)
-        btn_annotate.clicked.connect(self.annotate_image)
-        control_layout.addWidget(btn_annotate)
 
         main_layout.addLayout(control_layout)
 
@@ -123,6 +145,12 @@ class ContourEditor(QMainWindow):
         self.mode_selector.currentTextChanged.connect(self.change_mode)
         table_layout.addWidget(self.mode_selector)
 
+        # Delete button moved here (red)
+        btn_delete = QPushButton("Delete Selected Point")
+        btn_delete.setStyleSheet("background-color: salmon;")
+        btn_delete.clicked.connect(self.delete_selected_point)
+        table_layout.addWidget(btn_delete)
+
         table_container.setLayout(table_layout)
         splitter.addWidget(table_container)
         splitter.setStretchFactor(0, 1)
@@ -136,6 +164,33 @@ class ContourEditor(QMainWindow):
         self.view.mouseMoveEvent = self.mouse_move
         self.view.mouseReleaseEvent = self.mouse_release
 
+    def add_contour(self):
+        contour = {
+            "name": f"Contour {len(self.contours)+1}",
+            "points": [],
+            "layer_value": 255,
+            "mode": "line"   # mặc định line
+        }
+        self.contours.append(contour)
+        self.current_contour = contour
+        self.contour_selector.addItem(contour["name"])
+        self.contour_selector.setCurrentIndex(len(self.contours)-1)
+        self.update_table()
+
+    def change_contour(self, index):
+        if 0 <= index < len(self.contours):
+            self.current_contour = self.contours[index]
+            self.layer_value_box.setValue(self.current_contour["layer_value"])
+            # sync mode_selector
+            mode = self.current_contour.get("mode", "line")
+            self.mode_selector.setCurrentText(mode)
+            self.update_table()
+            self.update_display()
+
+    def update_contour_values(self):
+        if self.current_contour:
+            self.current_contour["layer_value"] = self.layer_value_box.value()
+
     def load_image(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.bmp)")
         if file_name:
@@ -144,8 +199,9 @@ class ContourEditor(QMainWindow):
             self.update_display()
 
     def change_mode(self, text):
-        self.mode = text
-        self.update_display()
+        if self.current_contour:
+            self.current_contour["mode"] = text
+            self.update_display()
 
     def zoom_in(self):
         self.zoom_factor *= 1.2
@@ -156,136 +212,188 @@ class ContourEditor(QMainWindow):
         self.update_display()
 
     def mouse_press(self, event):
+        if not self.current_contour:
+            return
         self.last_mouse_pos = event.pos()
         x, y = int(event.pos().x() / self.zoom_factor), int(event.pos().y() / self.zoom_factor)
         if event.button() == Qt.RightButton:
-            self.points.append((x, y))
+            self.current_contour["points"].append((x, y))
             self.update_table()
             self.update_display()
         elif event.button() == Qt.LeftButton:
-            for i, (px, py) in enumerate(self.points):
+            for i, (px, py) in enumerate(self.current_contour["points"]):
                 if abs(x - px) < self.radius and abs(y - py) < self.radius:
                     self.selected_point = i
                     return
 
     def mouse_move(self, event):
         if hasattr(self, 'hand_mode') and self.hand_mode.isChecked():
+            # Nếu chưa có neo thì đặt neo rồi thoát, tránh delta bị None
+            if self.last_mouse_pos is None:
+                self.last_mouse_pos = event.pos()
+                return
             delta = event.pos() - self.last_mouse_pos
             self.last_mouse_pos = event.pos()
             h_scroll = self.scroll_area.horizontalScrollBar()
             v_scroll = self.scroll_area.verticalScrollBar()
             h_scroll.setValue(h_scroll.value() - delta.x())
             v_scroll.setValue(v_scroll.value() - delta.y())
-            return  # Make sure to return here to avoid executing the rest of the method
+            return
 
-        if self.selected_point != -1:
+        if self.current_contour and self.selected_point != -1:
             x, y = int(event.pos().x() / self.zoom_factor), int(event.pos().y() / self.zoom_factor)
-            self.points[self.selected_point] = (x, y)
+            self.current_contour["points"][self.selected_point] = (x, y)
             self.update_table()
             self.update_display()
 
     def mouse_release(self, event):
+        self.last_mouse_pos = None
         self.selected_point = -1
 
     def update_table(self):
         self.table.blockSignals(True)
-        self.table.setRowCount(len(self.points))
-        for i, (x, y) in enumerate(self.points):
+        if not self.current_contour:
+            self.table.setRowCount(0)
+            return
+        points = self.current_contour["points"]
+        self.table.setRowCount(len(points))
+        for i, (x, y) in enumerate(points):
             self.table.setItem(i, 0, QTableWidgetItem(str(x)))
             self.table.setItem(i, 1, QTableWidgetItem(str(y)))
         self.table.blockSignals(False)
 
     def table_item_changed(self, item):
+        if not self.current_contour:
+            return
         row = item.row()
         try:
             x = int(self.table.item(row, 0).text())
             y = int(self.table.item(row, 1).text())
-            self.points[row] = (x, y)
+            self.current_contour["points"][row] = (x, y)
             self.update_display()
         except ValueError:
             pass
 
     def delete_selected_point(self):
+        if not self.current_contour:
+            return
         selected = self.table.currentRow()
-        if 0 <= selected < len(self.points):
-            self.points.pop(selected)
+        if 0 <= selected < len(self.current_contour["points"]):
+            self.current_contour["points"].pop(selected)
             self.update_table()
             self.update_display()
 
     def update_display(self):
-        h_val = self.scroll_area.horizontalScrollBar().value() if hasattr(self, 'scroll_area') else 0
-        v_val = self.scroll_area.verticalScrollBar().value() if hasattr(self, 'scroll_area') else 0
         if self.image is None:
             return
         img = cv2.cvtColor(self.image.copy(), cv2.COLOR_GRAY2RGB)
-        for i, (x, y) in enumerate(self.points):
-            cv2.circle(img, (x, y), self.radius, (0, 0, 255), -1)
-            if self.mode == 'line' and i > 0:
-                cv2.line(img, self.points[i-1], (x, y), (255, 0, 0), 2)
-        if len(self.points) > 2:
-            if self.mode == 'line':
-                cv2.polylines(img, [np.array(self.points)], isClosed=True, color=(0, 255, 0), thickness=2)
-            else:
-                curve = cv2.approxPolyDP(np.array(self.points), epsilon=1.0, closed=True)
-                cv2.polylines(img, [curve], isClosed=True, color=(0, 255, 0), thickness=2)
+        for contour in self.contours:
+            pts = contour["points"]
+            for i, (x, y) in enumerate(pts):
+                cv2.circle(img, (x, y), self.radius, (0, 0, 255), -1)
+                cv2.putText(img, f"P{i+1}", (x+5, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+            if len(pts) > 1:
+                mode = contour.get("mode", "line")
+                if len(pts) > 1:
+                    if mode == 'line':
+                        cv2.polylines(img, [np.array(pts)], isClosed=True, color=(0, 255, 0), thickness=2)
+                    elif mode == 'curve':
+                        pts_array = np.array(pts)
+                        if len(pts_array) >= 4:  # đủ điểm để spline
+                            x = pts_array[:,0]
+                            y = pts_array[:,1]
+                            try:
+                                tck, u = splprep([x, y], s=0, per=True)
+                                unew = np.linspace(0, 1.0, 100)
+                                out = splev(unew, tck)
+                                curve_pts = np.vstack(out).T.astype(np.int32)
+                                cv2.polylines(img, [curve_pts], isClosed=True, color=(0, 255, 0), thickness=2)
+                            except Exception as e:
+                                # fallback sang polyline nếu lỗi
+                                cv2.polylines(img, [pts_array], isClosed=True, color=(0, 255, 0), thickness=2)
+                        else:
+                            # chưa đủ điểm, fallback polyline
+                            cv2.polylines(img, [pts_array], isClosed=True, color=(0, 255, 0), thickness=2)
+            if pts:
+                cx, cy = pts[0]
+                cv2.putText(img, contour["name"], (cx+10, cy+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+
         h, w, ch = img.shape
         bytes_per_line = ch * w
         qt_img = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888)
         scaled_img = qt_img.scaled(int(w * self.zoom_factor), int(h * self.zoom_factor), Qt.KeepAspectRatio)
         self.view.setPixmap(QPixmap.fromImage(scaled_img))
-        if hasattr(self, 'scroll_area'):
-            self.scroll_area.horizontalScrollBar().setValue(h_val)
-            self.scroll_area.verticalScrollBar().setValue(v_val)
 
     def save_output(self):
         if self.image is None:
             return
         file_name, _ = QFileDialog.getSaveFileName(self, "Save Image", "contour_output.png", "PNG Files (*.png)")
         if file_name:
-            if self.is_annotated:
-                cv2.imwrite(file_name, self.image)
-                return
-            img = cv2.cvtColor(self.image.copy(), cv2.COLOR_GRAY2RGB)
-            for i, (x, y) in enumerate(self.points):
-                cv2.circle(img, (x, y), self.radius, (0, 0, 255), -1)
-                if self.mode == 'line' and i > 0:
-                    cv2.line(img, self.points[i-1], (x, y), (255, 0, 0), 2)
-            if len(self.points) > 2:
-                if self.mode == 'line':
-                    cv2.polylines(img, [np.array(self.points)], isClosed=True, color=(0, 255, 0), thickness=2)
-                else:
-                    curve = cv2.approxPolyDP(np.array(self.points), epsilon=1.0, closed=True)
-                    cv2.polylines(img, [curve], isClosed=True, color=(0, 255, 0), thickness=2)
-            cv2.imwrite(file_name, img)
+            cv2.imwrite(file_name, self.image)
+
+    def reset_pan_anchor(self, state):
+        self.last_mouse_pos = None
 
     def annotate_image(self):
-        if self.image is None or len(self.points) < 3:
+        if self.image is None:
             return
 
         if not self.is_annotated:
-            # Lưu ảnh gốc
             self.original_image = self.image.copy()
-
-            # Tạo mask từ contour
-            mask = np.zeros_like(self.image, dtype=np.uint8)
-            contour = np.array(self.points, dtype=np.int32)
-            cv2.fillPoly(mask, [contour], 1)
-
-            # Lấy giá trị từ ô nhập
-            base_val = self.base_value_box.value()
-            layer_val = self.layer_value_box.value()
-
-            # Tạo ảnh annotate
-            annotated = np.where(mask == 1, layer_val, base_val).astype(np.uint8)
+            annotated = np.full_like(self.image, self.base_value_box.value(), dtype=np.uint8)
+            for contour in self.contours:
+                pts = np.array(contour["points"], dtype=np.int32)
+                if len(pts) >= 3:
+                    mask = np.zeros_like(self.image, dtype=np.uint8)
+                    cv2.fillPoly(mask, [pts], 1)
+                    annotated = np.where(mask == 1, contour["layer_value"], annotated)
             self.image = annotated
             self.is_annotated = True
         else:
-            # Quay lại ảnh gốc
             self.image = self.original_image.copy()
             self.is_annotated = False
 
         self.update_display()
 
+    def save_contours(self):
+        if not self.contours:
+            return
+        file_name, _ = QFileDialog.getSaveFileName(self, "Save Contours", "contours.json", "JSON Files (*.json)")
+        if file_name:
+            with open(file_name, "w") as f:
+                json.dump(self.contours, f, indent=2)
+
+    def load_contours(self):
+        file_name, _ = QFileDialog.getOpenFileName(self, "Load Contours", "", "JSON Files (*.json)")
+        if file_name:
+            with open(file_name, "r") as f:
+                self.contours = json.load(f)
+            if self.contours:
+                self.current_contour = self.contours[0]
+            self.contour_selector.clear()
+            for c in self.contours:
+                self.contour_selector.addItem(c["name"])
+            self.update_table()
+            self.update_display()
+
+    def show_help(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Contour Editor - Help")
+        msg.setText(
+            "Contour Editor User Guide:\n\n"
+            "- Right-click on image: Add point to current contour\n"
+            "- Left-click + drag: Move point\n"
+            "- Mode (line/curve): Choose between straight lines or smooth curves\n"
+            "- Add Contour: Create a new contour\n"
+            "- Delete Selected Point: Remove selected point from table\n"
+            "- Base Value & Layer Value: Control annotation values\n"
+            "- Annotate: Toggle between raw image and annotated mask\n"
+            "- Hand Mode: Pan the image by dragging\n"
+            "- Zoom In/Out: Scale the image view\n"
+            "- Save Contours: Save current contours to JSON file\n"
+            "- Load Contours: Load contours from JSON file\n"
+        )
+        msg.exec_()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
