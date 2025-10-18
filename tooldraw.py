@@ -11,7 +11,6 @@ from qtpy.QtGui import QPixmap, QImage, QIcon
 from qtpy.QtCore import Qt
 import cv2
 import numpy as np
-from scipy.interpolate import splprep, splev
 import json
 from PyQt5.QtWidgets import QMessageBox
 
